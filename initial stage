@@ -1,0 +1,76 @@
+import pandas as pd
+import numpy as np
+import spacy
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report
+from sklearn.linear_model import LogisticRegression
+from gensim.models import Word2Vec
+import tensorflow as tf
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, LSTM, Dense, SpatialDropout1D
+from tensorflow.keras.wrappers.scikit_learn import KerasClassifier
+
+# Load data
+train_df = pd.read_csv('train.csv')
+
+# Text preprocessing
+nlp = spacy.load('en_core_web_sm', disable=['parser', 'ner'])
+
+def preprocess_text(text):
+    doc = nlp(text)
+    tokens = [token.lemma_ for token in doc if not token.is_stop]
+    return " ".join(tokens)
+
+train_df['comment_text'] = train_df['comment_text'].apply(preprocess_text)
+
+# Data splitting
+X_train, X_val, y_train, y_val = train_test_split(train_df['comment_text'], 
+                                                  train_df.drop(columns=['id', 'comment_text']), 
+                                                  test_size=0.2, 
+                                                  random_state=42)
+
+# Train Word2Vec model
+sentences = [sentence.split() for sentence in X_train]
+word2vec_model = Word2Vec(sentences, size=100, window=5, min_count=1, workers=4)
+
+# Create Word2Vec embedding matrix
+embedding_matrix = np.zeros((len(word2vec_model.wv.vocab) + 1, 100))
+for i, vec in enumerate(word2vec_model.wv.vectors):
+    embedding_matrix[i] = vec
+
+# Define LSTM model using TensorFlow
+def create_lstm_model(input_dim, output_dim, input_length):
+    model = Sequential([
+        Embedding(input_dim=input_dim, output_dim=output_dim, input_length=input_length, weights=[embedding_matrix], trainable=False),
+        SpatialDropout1D(0.2),
+        LSTM(100, dropout=0.2, recurrent_dropout=0.2),
+        Dense(6, activation='softmax')
+    ])
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    return model
+
+model = KerasClassifier(build_fn=create_lstm_model, verbose=0)
+
+# Define hyperparameter grid for GridSearchCV
+param_grid = {
+    'batch_size': [32, 64],
+    'epochs': [3, 5],
+    'input_dim': [len(word2vec_model.wv.vocab) + 1],
+    'output_dim': [100],
+    'input_length': [100]
+}
+
+# Perform GridSearchCV
+grid = GridSearchCV(estimator=model, param_grid=param_grid, cv=3)
+grid_result = grid.fit(X_train_pad, y_train)
+
+# Print best model and results
+best_model = grid_result.best_estimator_
+print("Best: %f using %s" % (grid_result.best_score_, grid_result.best_params_))
+
+# Evaluate on validation data
+y_pred = best_model.predict(X_val_pad)
+print(classification_report(y_val, y_pred))
